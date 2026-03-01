@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "donx64mcp-dbg": {
+      "command": "python",
+      "args": ["bridge/mcp_debugger_server.py"]
+    }
+  }
+}

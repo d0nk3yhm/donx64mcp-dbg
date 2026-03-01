@@ -1,41 +1,49 @@
-# Prerequisites
-*.d
-
-# Compiled Object files
-*.slo
-*.lo
-*.o
+# Build artifacts
 *.obj
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Linker files
-*.ilk
-
-# Debugger Files
-*.pdb
-
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
-*.a
 *.lib
+*.exp
+*.pdb
+*.ilk
+*.iobj
+*.ipdb
 
-# Executables
-*.exe
-*.out
-*.app
+# Compiled binaries (users must build from source)
+dll/mcp_debugger.dll
+injector/mcp_inject.exe
+build_total/
+x64/
+Debug/
+Release/
 
-# debug information files
-*.dwo
+# Build logs
+*.log
+dll/build_output.txt
+dll/build_full_output.txt
+dll/build_stderr.txt
+dll/build_stdout.txt
+dll/build_result.txt
+
+# Visual Studio
+.vs/
+*.vcxproj.user
+*.suo
+*.sdf
+*.opensdf
+*.cachefile
+ipch/
+
+# Claude Code local config (user-specific)
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Misc
+nul_
