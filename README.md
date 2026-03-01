@@ -30,7 +30,8 @@ Designed for authorized security research, reverse engineering, and CTF challeng
 ### One-command install
 
 ```batch
-git clone https://github.com/<your-username>/donx64mcp-dbg.git
+
+git clone https://github.com/d0nk3yhm/donx64mcp-dbg.git
 cd donx64mcp-dbg
 install.bat
 ```
