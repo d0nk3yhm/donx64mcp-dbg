@@ -130,8 +130,9 @@ static PeInfo ParsePe(const std::vector<uint8_t>& data) {
 // ------------------------------------------------------------- IL scanning
 
 struct Candidate {
-    uint32_t fileOffset;      // offset of the ldc.i4 opcode byte
+    uint32_t fileOffset;      // offset of the ldc opcode byte
     int32_t  value;           // the literal int32
+    uint8_t  valueLen;        // 4 (ldc.i4) or 1 (ldc.i4.s) - how many bytes the literal occupies
     uint8_t  followOp;        // 0x73 newobj, 0x28 call, 0x6F callvirt
     uint32_t token;           // the 4-byte metadata token that follows
     const char* tokenTable;   // human label for the token's high byte
@@ -146,23 +147,45 @@ static const char* TokenTableName(uint32_t token) {
     }
 }
 
-// ldc.i4 = 0x20 (5 bytes: opcode + int32). The short forms (ldc.i4.s, ldc.i4.0..8)
-// only cover -1..8 and one signed byte, both far outside any real AppID range, so
-// they are deliberately not matched here - a real AppID never compiles to them.
+static bool IsCallLike(uint8_t op) { return op == 0x73 || op == 0x28 || op == 0x6F; }
+
+// A candidate is: ldc.i4 <int32> (opcode 0x20, 5 bytes) OR ldc.i4.s <sbyte>
+// (opcode 0x1F, 2 bytes) - the short form only exists for values -128..127, which
+// covers real Steam's oldest, lowest AppIDs (Half-Life is 10) - immediately
+// followed by newobj/call/callvirt (0x73/0x28/0x6F), each taking a 4-byte
+// metadata token. That instruction pair is exactly what `new AppId_t(N)` or
+// `SteamAPI.RestartAppIfNecessary(N)` compiles to, and it survives essentially
+// unchanged through Mono/IL2CPP builds since obfuscation that targets Unity
+// games overwhelmingly leaves IL constants alone.
+//
+// filterValue, when set, requires an EXACT match on the literal - this is the
+// primary workflow (you already know the real AppID from steam_appid.txt or
+// the store page, so search for THAT specific number, the same way a human
+// reversing this by hand would - not a blind dump of every ldc.i4 in a range).
 static std::vector<Candidate> Scan(const std::vector<uint8_t>& data, uint32_t start,
-                                    uint32_t end, int64_t minVal, int64_t maxVal) {
+                                    uint32_t end, int64_t minVal, int64_t maxVal,
+                                    std::optional<int32_t> filterValue) {
     std::vector<Candidate> out;
     if (end > data.size()) end = (uint32_t)data.size();
-    for (uint32_t i = start; i + 10 <= end; i++) {
-        if (data[i] != 0x20) continue;                 // ldc.i4
-        int32_t val;
-        memcpy(&val, &data[i + 1], 4);
-        if (val < minVal || val > maxVal) continue;
-        uint8_t follow = data[i + 5];
-        if (follow != 0x73 && follow != 0x28 && follow != 0x6F) continue; // newobj/call/callvirt
+    for (uint32_t i = start; i < end; i++) {
+        int32_t val; uint8_t valLen; uint32_t followAt;
+        if (data[i] == 0x20 && i + 5 <= end) {                 // ldc.i4 <int32>
+            memcpy(&val, &data[i + 1], 4);
+            valLen = 4; followAt = i + 5;
+        } else if (data[i] == 0x1F && i + 2 <= end) {          // ldc.i4.s <sbyte>
+            val = (int8_t)data[i + 1];
+            valLen = 1; followAt = i + 2;
+        } else {
+            continue;
+        }
+        if (followAt + 5 > end) continue;
+        if (filterValue) { if (val != *filterValue) continue; }
+        else { if (val < minVal || val > maxVal) continue; }
+        uint8_t follow = data[followAt];
+        if (!IsCallLike(follow)) continue;
         uint32_t token;
-        memcpy(&token, &data[i + 6], 4);
-        Candidate c{ i, val, follow, token, TokenTableName(token) };
+        memcpy(&token, &data[followAt + 1], 4);
+        Candidate c{ i, val, valLen, follow, token, TokenTableName(token) };
         out.push_back(c);
     }
     return out;
@@ -178,24 +201,29 @@ static const char* OpName(uint8_t op) {
 static void Usage(const char* argv0) {
     printf(
         "appid_patch - find/patch a Steam AppID literal in a .NET assembly's IL\n\n"
+        "The workflow that actually works: you already know the REAL AppID (it's in\n"
+        "steam_appid.txt, the store page URL, or the game's SteamDB entry) - search for\n"
+        "THAT number specifically, the same way you'd grep for it by hand. A blind dump\n"
+        "of every small integer constant in the file is not a usable answer; searching\n"
+        "for a number you already know almost always is.\n\n"
         "Usage:\n"
-        "  %s <dll>                                 list AppID-shaped candidates\n"
-        "  %s <dll> --min N --max N                 list, with a custom plausible range\n"
-        "  %s <dll> --patch NEWVALUE --at 0xOFFSET   patch the literal at an exact file offset\n"
-        "  %s <dll> --patch NEWVALUE --auto          patch iff exactly one candidate matches\n"
-        "  %s <dll> --patch NEWVALUE --auto --value OLD   ...and its value is exactly OLD\n\n"
+        "  %s <dll> --find OLDVALUE                       find occurrences of a KNOWN AppID (primary use)\n"
+        "  %s <dll> --find OLDVALUE --patch NEW           find, and patch if there's exactly one hit\n"
+        "  %s <dll> --find OLDVALUE --patch NEW --at 0xOFF  patch one specific hit (when --find has several)\n"
+        "  %s <dll> --min N --max N                       don't know the real AppID? list everything\n"
+        "                                                   plausible in a range instead (usually noisy)\n\n"
         "Always writes <dll>.bak (once; refuses to overwrite an existing one) before patching.\n",
-        argv0, argv0, argv0, argv0, argv0);
+        argv0, argv0, argv0, argv0);
 }
 
 int main(int argc, char** argv) {
     if (argc < 2) { Usage(argv[0]); return 1; }
     std::string path = argv[1];
-    int64_t minVal = 1, maxVal = 5000000;   // Valve's AppID space so far; override with --min/--max
+    int64_t minVal = 1, maxVal = 5000000;   // only used when --find is absent
+    std::optional<int32_t> findValue;
     std::optional<int32_t> patchTo;
     std::optional<uint32_t> atOffset;
-    std::optional<int64_t> requireOldValue;
-    bool autoMode = false;
+    bool rangeGiven = false;
 
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
@@ -203,13 +231,18 @@ int main(int argc, char** argv) {
             if (i + 1 >= argc) { fprintf(stderr, "%s needs a value\n", name); exit(2); }
             return argv[++i];
         };
-        if (a == "--min") minVal = _atoi64(next("--min").c_str());
-        else if (a == "--max") maxVal = _atoi64(next("--max").c_str());
+        if (a == "--find") findValue = (int32_t)_atoi64(next("--find").c_str());
+        else if (a == "--min") { minVal = _atoi64(next("--min").c_str()); rangeGiven = true; }
+        else if (a == "--max") { maxVal = _atoi64(next("--max").c_str()); rangeGiven = true; }
         else if (a == "--patch") patchTo = (int32_t)_atoi64(next("--patch").c_str());
         else if (a == "--at") atOffset = (uint32_t)strtoul(next("--at").c_str(), nullptr, 0);
-        else if (a == "--auto") autoMode = true;
-        else if (a == "--value") requireOldValue = _atoi64(next("--value").c_str());
         else { fprintf(stderr, "unknown argument: %s\n", a.c_str()); Usage(argv[0]); return 2; }
+    }
+    if (!findValue && !rangeGiven) {
+        fprintf(stderr, "Need either --find OLDVALUE (you know the real AppID - use this) "
+                        "or --min/--max (a range dump, for when you don't).\n\n");
+        Usage(argv[0]);
+        return 1;
     }
 
     FILE* f = nullptr;
@@ -234,56 +267,71 @@ int main(int argc, char** argv) {
 
     uint32_t scanStart = pe.textRaw ? pe.textRaw : 0;
     uint32_t scanEnd = pe.textRaw ? pe.textRaw + pe.textSize : (uint32_t)data.size();
-    auto candidates = Scan(data, scanStart, scanEnd, minVal, maxVal);
+    auto candidates = Scan(data, scanStart, scanEnd, minVal, maxVal, findValue);
 
-    printf("\n%zu candidate literal(s) in [%lld, %lld] immediately followed by newobj/call/callvirt:\n",
-           candidates.size(), (long long)minVal, (long long)maxVal);
+    if (findValue) {
+        printf("\n%zu occurrence(s) of %d immediately followed by newobj/call/callvirt:\n",
+               candidates.size(), *findValue);
+    } else {
+        printf("\n%zu candidate literal(s) in [%lld, %lld] immediately followed by "
+               "newobj/call/callvirt (this is a discovery dump, not a targeted search - "
+               "most of these are unrelated constants):\n",
+               candidates.size(), (long long)minVal, (long long)maxVal);
+    }
     for (auto& c : candidates) {
-        printf("  file offset 0x%08X : ldc.i4 %-10d  %s  token 0x%08X (%s)\n",
-               c.fileOffset, c.value, OpName(c.followOp), c.token, c.tokenTable);
+        printf("  file offset 0x%08X : %-9s %-10d  %s  token 0x%08X (%s)\n",
+               c.fileOffset, c.valueLen == 1 ? "ldc.i4.s" : "ldc.i4", c.value,
+               OpName(c.followOp), c.token, c.tokenTable);
+    }
+    if (findValue && candidates.empty()) {
+        printf("\nNot found in this exact ldc.i4/ldc.i4.s + newobj/call/callvirt form. Either this\n"
+               "build doesn't embed the AppID as a plain IL constant here, or it's shaped\n"
+               "differently (split across two half-word loads, XOR-masked, etc.) - that would\n"
+               "need a fresh look at the IL around wherever RestartAppIfNecessary is called.\n");
     }
 
     if (!patchTo) {
         if (!candidates.empty())
-            printf("\nTo patch one, re-run with --patch 480 --at 0x%X\n"
-                   "(or --patch 480 --auto if this offset list has exactly one hit you trust)\n",
-                   candidates[0].fileOffset);
+            printf("\nTo patch, add --patch NEW%s\n",
+                   candidates.size() == 1 ? " (there's exactly one hit, no --at needed)"
+                                          : " --at 0xOFFSET (pick one of the offsets above)");
         return 0;
     }
 
     // ---- patch mode ----
     uint32_t target;
+    const Candidate* targetC = nullptr;
     if (atOffset) {
         target = *atOffset;
-        bool found = false;
-        for (auto& c : candidates) if (c.fileOffset == target) { found = true; break; }
-        if (!found) {
-            fprintf(stderr, "0x%X is not one of the candidates listed above (or is outside .text) "
-                            "- refusing to patch a location this tool didn't itself identify as "
-                            "ldc.i4+newobj/call/callvirt.\n", target);
+        for (auto& c : candidates) if (c.fileOffset == target) { targetC = &c; break; }
+        if (!targetC) {
+            fprintf(stderr, "0x%X is not one of the occurrences listed above - refusing to patch a "
+                            "location this tool didn't itself identify as ldc.i4/ldc.i4.s + "
+                            "newobj/call/callvirt.\n", target);
             return 5;
         }
-    } else if (autoMode) {
-        std::vector<Candidate> pool = candidates;
-        if (requireOldValue) {
-            std::vector<Candidate> filtered;
-            for (auto& c : pool) if (c.value == *requireOldValue) filtered.push_back(c);
-            pool = filtered;
-        }
-        if (pool.size() != 1) {
-            fprintf(stderr, "--auto requires exactly one candidate; found %zu%s. "
-                            "Use --at 0xOFFSET to pick one explicitly.\n",
-                    pool.size(), requireOldValue ? " matching --value" : "");
+    } else {
+        if (candidates.size() != 1) {
+            fprintf(stderr, "%zu occurrences found; --patch needs --at 0xOFFSET to say which one "
+                            "(auto-picking with more than one match would be a guess).\n",
+                    candidates.size());
             return 6;
         }
-        target = pool[0].fileOffset;
-    } else {
-        fprintf(stderr, "--patch needs either --at 0xOFFSET or --auto\n");
-        return 2;
+        targetC = &candidates[0];
+        target = targetC->fileOffset;
     }
 
-    int32_t oldValue;
-    memcpy(&oldValue, &data[target + 1], 4);
+    int32_t newValue = *patchTo;
+    if (targetC->valueLen == 1 && (newValue < -128 || newValue > 127)) {
+        fprintf(stderr, "0x%X is a short-form ldc.i4.s (1-byte operand) and %d does not fit in a "
+                        "signed byte. Widening it to the long form would change the instruction's\n"
+                        "length and shift every offset after it (branch targets, exception handler\n"
+                        "ranges, method body sizes) - not a safe in-place byte patch. Refusing.\n",
+                target, newValue);
+        return 9;
+    }
+
+    int32_t oldValue = targetC->value;
 
     std::string bak = path + ".bak";
     FILE* bakCheck = nullptr;
@@ -300,8 +348,12 @@ int main(int argc, char** argv) {
         printf("backup written: %s\n", bak.c_str());
     }
 
-    int32_t newValue = *patchTo;
-    memcpy(&data[target + 1], &newValue, 4);
+    if (targetC->valueLen == 1) {
+        int8_t nv = (int8_t)newValue;
+        data[target + 1] = (uint8_t)nv;
+    } else {
+        memcpy(&data[target + 1], &newValue, 4);
+    }
 
     FILE* wf = nullptr;
     fopen_s(&wf, path.c_str(), "wb");
