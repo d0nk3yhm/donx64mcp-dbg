@@ -16,16 +16,19 @@ struct Breakpoint {
     DWORD    last_thread_id;
     uint64_t last_hit_tick;
     bool     hit_pending;  // New hit waiting to be read
+    bool     halting;      // If true, the target thread is HELD at the hit
+                           // until CmdBpContinue (a real halting breakpoint).
 };
 
 void        BreakpointInit();
 void        BreakpointCleanup();
 
-std::string CmdBpSet(uint64_t addr);
+std::string CmdBpSet(uint64_t addr, bool halting = false);
 std::string CmdBpDel(uint64_t addr);
 std::string CmdBpList();
 std::string CmdBpCtx(uint64_t addr);
 std::string CmdBpWait(uint64_t addr, DWORD timeout_ms);
+std::string CmdBpContinue(uint64_t addr);   // release a halted (halting) breakpoint
 std::string CmdBpEnable(uint64_t addr);
 std::string CmdBpDisable(uint64_t addr);
 

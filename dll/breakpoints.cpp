@@ -10,6 +10,13 @@ static Breakpoint g_breakpoints[MCP_MAX_BREAKPOINTS];
 static int        g_bp_count = 0;
 static PVOID      g_veh_handle = NULL;
 static HANDLE     g_bp_events[MCP_MAX_BREAKPOINTS]; // One event per BP for BP_WAIT
+static HANDLE     g_bp_resume_events[MCP_MAX_BREAKPOINTS]; // release a HALTED bp
+
+// A halting breakpoint holds the faulting thread inside the VEH until
+// CmdBpContinue signals it. This safety timeout auto-continues a thread that
+// nobody released, so a forgotten dbg_continue can never hang the target for
+// good (10 minutes is far longer than any interactive read/patch needs).
+#define MCP_BP_HALT_TIMEOUT_MS 600000
 
 // Track which BP we're single-stepping over (per-thread would be better,
 // but for simplicity we use a global — works for sequential LLM debugging)
@@ -60,17 +67,35 @@ static LONG WINAPI BreakpointVEH(EXCEPTION_POINTERS* ep) {
             bp.hit_count++;
             bp.hit_pending = true;
 
-            // Restore original byte so we can execute it
-            RestoreOriginal(bp.address, bp.original_byte);
+            bool     halting  = bp.halting;
+            HANDLE   resume   = g_bp_resume_events[idx];
+            uint64_t hit_addr = bp.address;
+            uint8_t  orig     = bp.original_byte;
 
-            // Set trap flag for single-step (re-arm after one instruction)
-            ep->ContextRecord->EFlags |= 0x100; // TF
-            g_stepping_over_bp = bp.address;
-
-            // Signal the wait event
+            // Signal the wait event so BP_WAIT returns with the context.
             if (g_bp_events[idx])
                 SetEvent(g_bp_events[idx]);
 
+            LeaveCriticalSection(&g_bp_cs);
+
+            // HALTING breakpoint: hold THIS (the target) thread inside the VEH
+            // until CmdBpContinue releases it. Reads/writes the client issues
+            // meanwhile run on the debugger's pipe thread, so it can inspect or
+            // patch while the target is frozen at the hit - which a
+            // report-and-continue breakpoint cannot do. A safety timeout
+            // guarantees the thread is never held for good.
+            if (halting && resume)
+                WaitForSingleObject(resume, MCP_BP_HALT_TIMEOUT_MS);
+
+            // Restore the original byte and single-step over it to re-arm.
+            EnterCriticalSection(&g_bp_cs);
+            int idx2 = FindBp(hit_addr);
+            if (idx2 >= 0)
+                RestoreOriginal(g_breakpoints[idx2].address, g_breakpoints[idx2].original_byte);
+            else
+                RestoreOriginal(hit_addr, orig);   // deleted while halted
+            g_stepping_over_bp = hit_addr;
+            ep->ContextRecord->EFlags |= 0x100; // TF
             LeaveCriticalSection(&g_bp_cs);
             return EXCEPTION_CONTINUE_EXECUTION;
         }
@@ -133,7 +158,9 @@ void BreakpointCleanup() {
         if (g_breakpoints[i].active) {
             RestoreOriginal(g_breakpoints[i].address, g_breakpoints[i].original_byte);
         }
+        if (g_bp_resume_events[i]) SetEvent(g_bp_resume_events[i]); // free any held thread
         SAFE_CLOSE_HANDLE(g_bp_events[i]);
+        SAFE_CLOSE_HANDLE(g_bp_resume_events[i]);
     }
     g_bp_count = 0;
 
@@ -151,7 +178,7 @@ void BreakpointCleanup() {
 // Command Handlers
 // ═════════════════════════════════════════════════════════════════════════
 
-std::string CmdBpSet(uint64_t addr) {
+std::string CmdBpSet(uint64_t addr, bool halting) {
     EnterCriticalSection(&g_bp_cs);
 
     if (FindBp(addr) >= 0) {
@@ -169,6 +196,7 @@ std::string CmdBpSet(uint64_t addr) {
     memset(&bp, 0, sizeof(bp));
     bp.address = addr;
     bp.enabled = true;
+    bp.halting = halting;
 
     if (!WriteInt3(addr, &bp.original_byte)) {
         LeaveCriticalSection(&g_bp_cs);
@@ -176,7 +204,8 @@ std::string CmdBpSet(uint64_t addr) {
     }
 
     bp.active = true;
-    g_bp_events[idx] = CreateEventA(NULL, FALSE, FALSE, NULL); // Auto-reset
+    g_bp_events[idx]        = CreateEventA(NULL, FALSE, FALSE, NULL); // Auto-reset
+    g_bp_resume_events[idx] = CreateEventA(NULL, FALSE, FALSE, NULL); // release-halt
     g_bp_count++;
 
     LeaveCriticalSection(&g_bp_cs);
@@ -185,6 +214,7 @@ std::string CmdBpSet(uint64_t addr) {
         .add("status", "ok")
         .addHex("address", addr)
         .add("index", (int64_t)idx)
+        .add("halting", halting)
         .add("original_byte", bytes_to_hex(&bp.original_byte, 1))
         .build();
 }
@@ -202,12 +232,17 @@ std::string CmdBpDel(uint64_t addr) {
         RestoreOriginal(addr, g_breakpoints[idx].original_byte);
     }
 
+    // Release any thread currently held on this (halting) breakpoint first.
+    if (g_bp_resume_events[idx]) SetEvent(g_bp_resume_events[idx]);
+
     SAFE_CLOSE_HANDLE(g_bp_events[idx]);
+    SAFE_CLOSE_HANDLE(g_bp_resume_events[idx]);
 
     // Compact array
     for (int i = idx; i < g_bp_count - 1; i++) {
-        g_breakpoints[i] = g_breakpoints[i + 1];
-        g_bp_events[i] = g_bp_events[i + 1];
+        g_breakpoints[i]      = g_breakpoints[i + 1];
+        g_bp_events[i]        = g_bp_events[i + 1];
+        g_bp_resume_events[i] = g_bp_resume_events[i + 1];
     }
     g_bp_count--;
 
@@ -285,6 +320,34 @@ std::string CmdBpCtx(uint64_t addr) {
         .addHex("address", addr)
         .add("hit_count", (int64_t)bp.hit_count)
         .addRaw("context", ctx_json)
+        .build();
+}
+
+// ── Release a halted (halting) breakpoint ───────────────────────────────
+
+std::string CmdBpContinue(uint64_t addr) {
+    EnterCriticalSection(&g_bp_cs);
+
+    int idx = FindBp(addr);
+    if (idx < 0) {
+        LeaveCriticalSection(&g_bp_cs);
+        return ErrorResponse("no breakpoint at this address");
+    }
+
+    bool   halting = g_breakpoints[idx].halting;
+    HANDLE resume  = g_bp_resume_events[idx];
+
+    LeaveCriticalSection(&g_bp_cs);
+
+    if (!halting)
+        return ErrorResponse("breakpoint is not a halting breakpoint (set it with halt=true)");
+    if (resume)
+        SetEvent(resume);   // release the target thread held in the VEH
+
+    return Response()
+        .add("status", "ok")
+        .addHex("address", addr)
+        .add("message", "continued")
         .build();
 }
 

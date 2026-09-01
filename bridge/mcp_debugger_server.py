@@ -314,9 +314,23 @@ def dbg_strings(start: str, size: str, min_length: int = 4) -> str:
 # ── Breakpoints ───────────────────────────────────────────────────────────
 
 @mcp.tool()
-def dbg_bp_set(address: str) -> str:
-    """Set software breakpoint (INT3) at address. Re-arms after each hit."""
-    return send(f"BP_SET {address}")
+def dbg_bp_set(address: str, halt: bool = False) -> str:
+    """Set software breakpoint (INT3) at address. Re-arms after each hit.
+
+    halt=False (default): report-and-continue - the thread keeps running after the
+    hit; dbg_bp_wait just captures the register context.
+    halt=True: a HALTING breakpoint - the target thread is FROZEN at the hit until
+    dbg_continue(address) is called. While it is frozen you can dbg_read/dbg_write
+    memory (to inspect data that would otherwise be overwritten, or to patch code
+    before it executes). This is what lets you break-and-hold, then continue."""
+    return send(f"BP_SET {address} {1 if halt else 0}")
+
+@mcp.tool()
+def dbg_continue(address: str) -> str:
+    """Release a HALTING breakpoint (set with halt=True) so the target thread
+    resumes. Call after dbg_bp_wait returns and you have read/patched what you need.
+    A held thread also auto-continues after a safety timeout if never released."""
+    return send(f"BP_CONTINUE {address}")
 
 @mcp.tool()
 def dbg_bp_del(address: str) -> str:

@@ -170,8 +170,14 @@ std::string DispatchCommand(const std::string& command) {
     // ── Breakpoints ──────────────────────────────────────────────────
 
     if (cmd == "BP" || cmd == "BP_SET") {
-        if (tokens.size() < 2) return ErrorResponse("usage: BP <addr_hex>");
-        return CmdBpSet(ParseAddr(tokens[1]));
+        if (tokens.size() < 2) return ErrorResponse("usage: BP <addr_hex> [halt(0|1)]");
+        bool halting = tokens.size() >= 3 ? (ParseInt(tokens[2], 0) != 0) : false;
+        return CmdBpSet(ParseAddr(tokens[1]), halting);
+    }
+
+    if (cmd == "BP_CONTINUE") {
+        if (tokens.size() < 2) return ErrorResponse("usage: BP_CONTINUE <addr_hex>");
+        return CmdBpContinue(ParseAddr(tokens[1]));
     }
 
     if (cmd == "BP_DEL") {
