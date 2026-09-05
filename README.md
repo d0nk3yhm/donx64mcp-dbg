@@ -282,6 +282,46 @@ Total hooks at max level: **18**.
 
 ---
 
+## Analyzing Timing-Based Checks
+
+Many binaries use timing functions to detect debugger interference. The debugger slows execution, causing timestamp checks to fail. This toolkit provides multiple approaches:
+
+### Approach 1: Use Timing Stealth (Automatic)
+Activate Tier 2 stealth to automatically spoof timing functions:
+```
+dbg_stealth_on(2)  # GetTickCount, QueryPerformanceCounter return fake values
+```
+The target sees consistent time even while you're debugging.
+
+### Approach 2: Analyze and Patch the Check (Manual)
+1. Hook the timing function with a breakpoint:
+   ```
+   dbg_exports("kernel32.dll") → find GetTickCount address
+   dbg_bp_set(gtc_address, halt=True)
+   ```
+2. Resume and wait for the breakpoint to hit:
+   ```
+   dbg_thread_resume(main_thread_id)
+   dbg_bp_wait(gtc_address, timeout_ms=10000)
+   ```
+3. Inspect the caller's code (what happens after the return):
+   ```
+   dbg_bp_ctx(gtc_address) → get RIP/RSP
+   dbg_disasm(return_address, 20) → see the comparison/check
+   ```
+4. Identify the check pattern (cmp, test, conditional jump), then patch it:
+   ```
+   dbg_hook_scan_caller(gtc_address, scan_window=4096, pattern="...", replacement="...")
+   ```
+5. Release and continue:
+   ```
+   dbg_bp_continue(gtc_address)
+   ```
+
+The tool will automatically fire the hook on every subsequent call to the timing function, patching the check in-process with zero MCP latency.
+
+---
+
 ## Source Layout
 
 ```

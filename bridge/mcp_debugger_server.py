@@ -635,9 +635,17 @@ def dbg_heap_walk(heap_id: str, max_entries: int = 100) -> str:
 @mcp.tool()
 def dbg_stealth_on(level: int = 2) -> str:
     """Activate anti-anti-debug stealth. Defeats debugger detection in target.
+
     level 1: PEB patch + core API hooks + ETW disable
-    level 2: + DR sanitization, timing hooks, window/process filtering (default)
-    level 3: + instrumentation callback kill (max stealth)"""
+    level 2: + DR sanitization, timing hooks (GetTickCount, QueryPerformanceCounter, etc.),
+             window/process filtering (default)
+    level 3: + instrumentation callback kill (max stealth)
+
+    TIMING HOOKS (Level 2):
+      Hooks GetTickCount, GetTickCount64, QueryPerformanceCounter to return fake/consistent
+      values. Use this when the target checks elapsed time to detect debugger slowdown.
+      After calling dbg_stealth_on(2+), timing checks will see consistent tick counts
+      even while you're debugging."""
     return send(f"STEALTH_ON {level}")
 
 @mcp.tool()
