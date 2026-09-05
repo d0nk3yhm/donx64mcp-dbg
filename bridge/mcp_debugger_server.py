@@ -536,17 +536,18 @@ def dbg_hook_scan_caller(address: str, scan_window: int, pattern: str, replaceme
     first, then scans forward from the CALLER's own return address (the exact
     spot in the target's code that called it) for a byte pattern, and patches it
     in place if found. Runs entirely inside the target -- no MCP round-trip per
-    call, so it's fast enough for functions called continuously (e.g. a polled
-    tick/time function).
+    call, so it's fast enough for functions called continuously (e.g. timing
+    functions like GetTickCount, QueryPerformanceCounter).
 
     USE CASE:
-      Target calls a function. Right after the call, a comparison instruction
-      checks the return value. If it fails, execution branches to an error path.
+      Example: A function like GetTickCount is called every frame. Right after,
+      a comparison instruction checks if the return value matches an expected value.
+      If the check fails, execution branches to an error handler.
       → Hook the function, scan for the comparison instruction after the call,
         and patch it to skip the check. Use dbg_disasm to find the exact bytes.
 
     WORKFLOW:
-      1. dbg_exports(module_name) → find target function address
+      1. dbg_exports(module_name) → find function address (e.g., GetTickCount)
       2. dbg_hook_scan_caller(addr, 4096, "pattern", "replacement", "hook_name")
          ← hook installed, will fire on every call
       3. dbg_hook_list() → verify call_count increments as target runs
