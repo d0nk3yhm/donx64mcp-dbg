@@ -270,7 +270,7 @@ Note: When using from Claude/Codex, `dbg_attach()` handles injection automatical
 
 ## Anti-Anti-Debug Engine
 
-Three tiers of protection bypass via `STEALTH_ON <level>`:
+Three tiers of anti-debug stealth via `STEALTH_ON <level>`:
 
 **Tier 1 (Basic):** PEB patching (BeingDebugged, NtGlobalFlag, heap flags), ETW disable, hooks on `IsDebuggerPresent`, `CheckRemoteDebuggerPresent`, `NtQueryInformationProcess`, `NtClose`.
 

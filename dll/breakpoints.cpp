@@ -63,7 +63,6 @@ static LONG WINAPI BreakpointVEH(EXCEPTION_POINTERS* ep) {
             // Capture context
             bp.last_context   = *ep->ContextRecord;
             bp.last_thread_id = GetCurrentThreadId();
-            bp.last_hit_tick  = GetTickCount64();
             bp.hit_count++;
             bp.hit_pending = true;
 

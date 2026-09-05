@@ -323,6 +323,26 @@ std::string DispatchCommand(const std::string& command) {
         return CmdUnhook(ParseAddr(tokens[1]));
     }
 
+    if (cmd == "HOOK_SCAN_CALLER") {
+        if (tokens.size() < 5)
+            return ErrorResponse("usage: HOOK_SCAN_CALLER <addr_hex> <scan_window> <pattern_csv> <replacement_csv> [name]");
+        int scan_window = ParseInt(tokens[2]);
+        std::string name = tokens.size() >= 6 ? JoinFrom(tokens, 5) : "";
+        return CmdHookScanCaller(ParseAddr(tokens[1]), scan_window, tokens[3], tokens[4], name);
+    }
+
+    if (cmd == "HOOK_SCAN_OUTPUT") {
+        if (tokens.size() < 8)
+            return ErrorResponse("usage: HOOK_SCAN_OUTPUT <addr_hex> <buf_arg_idx> <len_arg_idx> <len_is_ptr:0|1> <pattern_csv> <patch_offset> <replacement_csv> [name]");
+        int buf_idx = ParseInt(tokens[2]);
+        int len_idx = ParseInt(tokens[3]);
+        bool len_is_ptr = ParseInt(tokens[4]) != 0;
+        int patch_offset = ParseInt(tokens[6]);
+        std::string name = tokens.size() >= 9 ? JoinFrom(tokens, 8) : "";
+        return CmdHookScanOutput(ParseAddr(tokens[1]), buf_idx, len_idx, len_is_ptr,
+                                  tokens[5], patch_offset, tokens[7], name);
+    }
+
     if (cmd == "HOOK_LIST") {
         return CmdHookList();
     }
@@ -388,6 +408,8 @@ std::string DispatchCommand(const std::string& command) {
             "THREAD_SUSPEND <tid>", "THREAD_RESUME <tid>", "CALLSTACK <tid>",
             "MODULES", "EXPORTS <module>", "IMPORTS <module>", "SECTIONS <module>",
             "HOOK <addr> [name]", "HOOK <module.dll> <Function>", "UNHOOK <addr>", "UNHOOK <module.dll> <Function>", "HOOK_LIST", "HOOK_LOG <addr> [count]",
+            "HOOK_SCAN_CALLER <addr> <window> <pattern_csv> <replacement_csv> [name]",
+            "HOOK_SCAN_OUTPUT <addr> <buf_arg> <len_arg> <len_is_ptr> <pattern_csv> <offset> <replacement_csv> [name]",
             "HEAPS", "HEAP_WALK <heap_id> [max]",
             "STEALTH_ON [level]", "STEALTH_OFF", "STEALTH_STATUS",
             "STEALTH_PATCH_PEB", "STEALTH_HIDE", "STEALTH_UNHIDE",

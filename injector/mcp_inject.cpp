@@ -714,7 +714,10 @@ static void PrintUsage(const char* exe) {
     printf("  %s --wait-dll <name.dll> --in <proc> --dll <path> [--timeout <ms>]\n", exe);
     printf("                                                   Wait for DLL load, then inject\n\n");
     printf("Options:\n");
-    printf("  --manualmap, --mm    Use manual mapping instead of LoadLibrary (stealthier)\n\n");
+    printf("  --manualmap, --mm    Use manual mapping instead of LoadLibrary (stealthier)\n");
+    printf("  --hold               (with --launch) inject before the main thread runs, then\n");
+    printf("                       leave it suspended (see MainThreadId) instead of resuming\n");
+    printf("                       it -- resume later via THREAD_RESUME once hooks are set.\n\n");
     printf("After injection, connect via named pipe: \\\\.\\pipe\\mcp_dbg_<PID>\n");
 }
 
@@ -733,6 +736,7 @@ int main(int argc, char* argv[]) {
     const char* wait_proc   = NULL;
     int  timeout_ms = 30000;
     bool manual_map = false;
+    bool hold_suspended = false;
 
     // Parse arguments
     for (int i = 1; i < argc; i++) {
@@ -754,6 +758,8 @@ int main(int argc, char* argv[]) {
             timeout_ms = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--manualmap") == 0 || strcmp(argv[i], "--mm") == 0) {
             manual_map = true;
+        } else if (strcmp(argv[i], "--hold") == 0) {
+            hold_suspended = true;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             PrintUsage(argv[0]);
             return 0;
@@ -838,8 +844,13 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        printf("[+] Injection successful, resuming process...\n");
-        ResumeThread(pi.hThread);
+        if (hold_suspended) {
+            printf("[+] Injection successful, holding process suspended.\n");
+            printf("[+] MainThreadId: %lu\n", pi.dwThreadId);
+        } else {
+            printf("[+] Injection successful, resuming process...\n");
+            ResumeThread(pi.hThread);
+        }
 
         printf("[+] Pipe: \\\\.\\pipe\\mcp_dbg_%lu\n", pi.dwProcessId);
 

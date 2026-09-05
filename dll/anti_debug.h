@@ -8,7 +8,7 @@
 // ── Anti-Anti-Debug Engine ──────────────────────────────────────────────
 //
 // Defeats anti-debugging protections in the target process.
-// Three tiers of protection bypass:
+// Three tiers of anti-debug stealth:
 //
 // Tier 1 (STEALTH_BASIC):  PEB patches, core API hooks, ETW disable, module hiding
 // Tier 2 (STEALTH_FULL):   + Exception/context sanitization, timing, integrity, window/process filter
@@ -65,8 +65,8 @@ bool RestoreETW();                       // Restore original EtwEventWrite
 
 bool InstallApiHooks();                  // Core API hooks (Tier 1)
 bool InstallContextHooks();              // DR register sanitization (Tier 2)
-bool InstallTimingHooks();               // Timing bypass (Tier 2)
-bool InstallThreadHooks();               // Thread hiding bypass (Tier 2)
+bool InstallTimingHooks();               // Timing hooks stealth (Tier 2)
+bool InstallThreadHooks();               // Thread hiding stealth (Tier 2)
 bool InstallWindowHooks();               // Window/process enumeration filter (Tier 2)
 bool InstallNtdllHooks();                // NtClose, NtQueryObject (Tier 2)
 bool KillInstrumentationCallback();      // Neutralize instrumentation callback (Tier 3)

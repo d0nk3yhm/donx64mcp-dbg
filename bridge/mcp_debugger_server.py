@@ -9,7 +9,7 @@
 #
 # No PID needed in the MCP config - just add this server once, use dbg_attach per session.
 
-import sys, os, json, time, subprocess
+import sys, os, json, time, re, subprocess, tempfile
 
 _THIS  = os.path.dirname(os.path.abspath(__file__))
 _ROOT  = os.path.dirname(_THIS)
@@ -196,6 +196,101 @@ def dbg_attach(exe_name: str) -> str:
 
 
 @mcp.tool()
+def dbg_launch(exe_path: str, args: str = "", hold: bool = True) -> str:
+    """
+    Launch a NEW process suspended and inject the debugger DLL before its main
+    thread executes a single instruction -- then (by default) leave it
+    suspended so you can install hooks/breakpoints/patches before anything in
+    the target runs. Use this instead of dbg_attach whenever what you need to
+    hook must be in place before the target's own startup code runs even once.
+
+    WORKFLOW:
+      1. dbg_launch(exe_path, hold=True)  ← target suspended, DLL injected
+      2. dbg_exports("module.dll") or dbg_disasm() to find target functions
+      3. dbg_hook_scan_caller() or dbg_bp_set() to install patches/breakpoints
+      4. dbg_stealth_on() if target has anti-debug checks
+      5. dbg_thread_resume(main_thread_id) ← target runs with patches in place
+      6. dbg_bp_wait() or dbg_read() to monitor/verify patches worked
+
+    exe_path: full path to the executable to launch
+    args: optional command-line arguments, as one string
+    hold: True (default) leaves the main thread suspended after injecting.
+          Read `main_thread_id` from the result and call
+          dbg_thread_resume(main_thread_id) once you're set up.
+          False resumes immediately after injection, like a normal launch.
+    """
+    if not os.path.exists(INJECTOR):
+        return json.dumps({"status": "error", "message": f"Injector not found: {INJECTOR}"})
+    if not os.path.exists(DBG_DLL):
+        return json.dumps({"status": "error", "message": f"DLL not found: {DBG_DLL}"})
+
+    cmd = [INJECTOR, "--launch", exe_path]
+    if args:
+        cmd += ["--args", args]
+    cmd += ["--dll", DBG_DLL]
+    if hold:
+        cmd += ["--hold"]
+
+    # IMPORTANT: capture_output=True creates INHERITABLE pipes on Windows.
+    # mcp_inject's suspended child (via shared console) ends up holding the
+    # other end of those pipes, and subprocess.run() then blocks forever
+    # waiting for pipe close after the injector has already exited.
+    # Route the injector's stdio through real files instead.
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.out', delete=False) as fo, \
+         tempfile.NamedTemporaryFile(mode='w', suffix='.err', delete=False) as fe:
+        out_path, err_path = fo.name, fe.name
+    try:
+        with open(out_path, 'w') as fo, open(err_path, 'w') as fe:
+            r = subprocess.run(cmd, stdout=fo, stderr=fe, timeout=20)
+        with open(out_path) as f: stdout = f.read()
+        with open(err_path) as f: stderr = f.read()
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+    # Deliberately don't unlink — the suspended target may inherit the handle
+    # via the shared console. The files land in %TEMP% and Windows cleans them.
+
+    out = stdout + stderr
+    result = {"exe": exe_path, "injector_output": out.strip()}
+
+    pid_m = re.search(r"mcp_dbg_(\d+)", out)
+    tid_m = re.search(r"MainThreadId:\s*(\d+)", out)
+    if r.returncode != 0 or not pid_m:
+        result["status"] = "error"
+        result["message"] = "Launch/inject failed -- see injector_output"
+        return json.dumps(result, indent=2)
+
+    pid = int(pid_m.group(1))
+    result["pid"] = pid
+    result["pipe"] = pipe_name(pid)
+    if tid_m:
+        result["main_thread_id"] = int(tid_m.group(1))
+    result["held"] = hold
+
+    time.sleep(0.5)
+    ok2, conn_msg = _client.attach(pid)
+    result["connect"] = conn_msg
+    if not ok2:
+        result["status"] = "error"
+        result["message"] = f"Pipe connect failed: {conn_msg}"
+        return json.dumps(result, indent=2)
+
+    ping = _client.send("PING")
+    if ping.get("status") is True or ping.get("message") == "pong":
+        result["status"] = "ok"
+        if hold:
+            result["message"] = (f"Launched PID={pid}, held suspended at main_thread_id="
+                                  f"{result.get('main_thread_id')}. Set up hooks, then call "
+                                  f"dbg_thread_resume({result.get('main_thread_id')}).")
+        else:
+            result["message"] = f"Launched and running, PID={pid}."
+    else:
+        result["status"] = "error"
+        result["message"] = f"Pipe connected but PING failed: {ping}"
+
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
 def dbg_ping() -> str:
     """Heartbeat — check if debugger DLL is alive and responding."""
     return send("PING")
@@ -322,7 +417,19 @@ def dbg_bp_set(address: str, halt: bool = False) -> str:
     halt=True: a HALTING breakpoint - the target thread is FROZEN at the hit until
     dbg_continue(address) is called. While it is frozen you can dbg_read/dbg_write
     memory (to inspect data that would otherwise be overwritten, or to patch code
-    before it executes). This is what lets you break-and-hold, then continue."""
+    before it executes). This is what lets you break-and-hold, then continue.
+
+    DECRYPTION WORKFLOW (catching .text decrypt mid-flight):
+      1. dbg_launch(exe, hold=True) ← process suspended
+      2. Identify the decryption routine (dbg_disasm, reverse engineering, etc)
+      3. dbg_bp_set(decrypt_addr, halt=True) ← install halting breakpoint
+      4. dbg_thread_resume(main_thread_id) ← process runs, hits breakpoint
+      5. dbg_bp_wait(decrypt_addr, 10000) ← blocks until breakpoint fires
+      6. dbg_read(.text_addr, size) ← read plaintext while halted
+      7. Verify/understand, then patch: dbg_write(addr, new_bytes)
+      8. dbg_bp_continue(decrypt_addr) ← release thread, execute patched code
+      9. Repeat for next check point, or dbg_bp_del to remove
+    """
     return send(f"BP_SET {address} {1 if halt else 0}")
 
 @mcp.tool()
@@ -421,6 +528,77 @@ def dbg_hook(address: str, name: str = "") -> str:
     cmd = f"HOOK {address}"
     if name: cmd += f" {name}"
     return send(cmd)
+
+@mcp.tool()
+def dbg_hook_scan_caller(address: str, scan_window: int, pattern: str, replacement: str, name: str = "") -> str:
+    """
+    Install a NATIVE in-process hook that, on every call, calls the real function
+    first, then scans forward from the CALLER's own return address (the exact
+    spot in the target's code that called it) for a byte pattern, and patches it
+    in place if found. Runs entirely inside the target -- no MCP round-trip per
+    call, so it's fast enough for functions called continuously (e.g. a polled
+    tick/time function).
+
+    USE CASE:
+      Target calls a function. Right after the call, a comparison instruction
+      checks the return value. If it fails, execution branches to an error path.
+      → Hook the function, scan for the comparison instruction after the call,
+        and patch it to skip the check. Use dbg_disasm to find the exact bytes.
+
+    WORKFLOW:
+      1. dbg_exports(module_name) → find target function address
+      2. dbg_hook_scan_caller(addr, 4096, "pattern", "replacement", "hook_name")
+         ← hook installed, will fire on every call
+      3. dbg_hook_list() → verify call_count increments as target runs
+      4. If target still fails → pattern didn't match. Use dbg_disasm to find
+         the exact bytes, or try larger scan_window.
+
+    address: hex address of the function to hook (see dbg_exports, or dbg_hook's
+             "module.dll FunctionName" resolution style)
+    scan_window: bytes to scan forward from the caller's return address (e.g. 64, max 4096)
+    pattern: comma-separated hex bytes, ?? = wildcard, e.g. "3C,30" or "80,FB,30"
+    replacement: comma-separated hex, same length or shorter than pattern
+                 (shorter is NOP-padded); ?? = leave that byte of the match alone
+    name: optional label
+
+    Returns: hook installed in a slot, ready to fire on next call.
+    """
+    return send(f"HOOK_SCAN_CALLER {address} {scan_window} "
+                f"{pattern.replace(' ', '')} {replacement.replace(' ', '')} {name}".rstrip())
+
+@mcp.tool()
+def dbg_hook_scan_output(address: str, buf_arg_index: int, len_arg_index: int,
+                          len_is_out_pointer: bool, pattern: str, patch_offset: int,
+                          replacement: str, name: str = "") -> str:
+    """
+    Install a NATIVE in-process hook that calls the real function, then scans one
+    of its arguments (treated as a buffer pointer) for a byte pattern and patches
+    bytes at an offset from the match.
+
+    Generalizes: "hook a function that fills a buffer, find a known marker in the
+    data it just produced, overwrite a value near it" -- e.g. hooking a file-read
+    function to find a marker string in the bytes just read and overwrite an
+    integer that follows it. Parameterized entirely by argument position and
+    calling convention; nothing here is specific to any file format or target.
+
+    address: hex address of the function to hook
+    buf_arg_index: which of the function's first 4 args (0=rcx,1=rdx,2=r8,3=r9)
+                   holds the pointer to the buffer to scan (e.g. ReadFile's
+                   lpBuffer is arg 1)
+    len_arg_index: which arg tells you how many bytes are valid to scan
+    len_is_out_pointer: True if that arg is a pointer to a length only filled in
+                   AFTER the real call returns (e.g. ReadFile's
+                   lpNumberOfBytesRead, arg 3) -- dereferenced as a DWORD post-call.
+                   False to treat the arg itself as a literal byte count.
+    pattern: comma-separated hex bytes, ?? = wildcard
+    patch_offset: byte offset from the START of the match to where replacement is
+                  written (can be negative to patch bytes just before the match)
+    replacement: comma-separated hex bytes to write; ?? = leave that byte alone
+    name: optional label
+    """
+    return send(f"HOOK_SCAN_OUTPUT {address} {buf_arg_index} {len_arg_index} "
+                f"{1 if len_is_out_pointer else 0} {pattern.replace(' ', '')} "
+                f"{patch_offset} {replacement.replace(' ', '')} {name}".rstrip())
 
 @mcp.tool()
 def dbg_unhook(address: str) -> str:
