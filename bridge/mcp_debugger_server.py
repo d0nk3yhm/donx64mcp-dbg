@@ -503,8 +503,9 @@ def dbg_modules() -> str:
 @mcp.tool()
 def dbg_exports(module_name: str) -> str:
     """List exported functions of a module.
-    module_name: e.g. "kernel32.dll" or "NWX-Win64-Shipping.exe"
-    Returns name, ordinal, RVA, absolute address."""
+    module_name: e.g. "kernel32.dll" (for system functions like GetTickCount,
+                 QueryPerformanceCounter) or "NWX-Win64-Shipping.exe"
+    Returns name, ordinal, RVA, absolute address for all exported functions."""
     return send(f"EXPORTS {module_name}")
 
 @mcp.tool()
@@ -547,7 +548,7 @@ def dbg_hook_scan_caller(address: str, scan_window: int, pattern: str, replaceme
         and patch it to skip the check. Use dbg_disasm to find the exact bytes.
 
     WORKFLOW:
-      1. dbg_exports(module_name) → find function address (e.g., GetTickCount)
+      1. dbg_exports("kernel32.dll") → find timing function address (GetTickCount, etc.)
       2. dbg_hook_scan_caller(addr, 4096, "pattern", "replacement", "hook_name")
          ← hook installed, will fire on every call
       3. dbg_hook_list() → verify call_count increments as target runs
