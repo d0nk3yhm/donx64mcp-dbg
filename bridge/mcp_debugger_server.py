@@ -152,7 +152,7 @@ def dbg_attach(exe_name: str) -> str:
     exe_name: The process executable name, e.g. "NWX-Win64-Shipping.exe" or "notepad.exe"
 
     Call this FIRST before any other dbg_* tool.
-    Call again if the game restarts (new PID).
+    Call again if the application restarts (new PID).
     """
     result = {"exe": exe_name}
 
