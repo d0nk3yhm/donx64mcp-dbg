@@ -272,17 +272,17 @@ std::string DispatchCommand(const std::string& command) {
 
     if (cmd == "EXPORTS") {
         if (tokens.size() < 2) return ErrorResponse("usage: EXPORTS <module_name>");
-        return CmdExports(tokens[1]);
+        return CmdExports(JoinFrom(tokens, 1));
     }
 
     if (cmd == "IMPORTS") {
         if (tokens.size() < 2) return ErrorResponse("usage: IMPORTS <module_name>");
-        return CmdImports(tokens[1]);
+        return CmdImports(JoinFrom(tokens, 1));
     }
 
     if (cmd == "SECTIONS") {
         if (tokens.size() < 2) return ErrorResponse("usage: SECTIONS <module_name>");
-        return CmdSections(tokens[1]);
+        return CmdSections(JoinFrom(tokens, 1));
     }
 
     // ── Hooks ────────────────────────────────────────────────────────
