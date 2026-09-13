@@ -7,7 +7,7 @@
 
 bool        HookInit();
 void        HookCleanup();
-std::string CmdHook(uint64_t addr, const std::string& name);
+std::string CmdHook(uint64_t addr, const std::string& name, int argument_count = 4);
 std::string CmdHookScanCaller(uint64_t addr, int scan_window, const std::string& pattern_csv,
                                const std::string& replacement_csv, const std::string& name);
 std::string CmdHookScanOutput(uint64_t addr, int buf_arg_index, int len_arg_index, bool len_is_out_pointer,

@@ -287,6 +287,10 @@ std::string DispatchCommand(const std::string& command) {
 
     // ── Hooks ────────────────────────────────────────────────────────
 
+    if (cmd == "HOOK_TYPED") {
+        if (tokens.size() < 3) return ErrorResponse("usage: HOOK_TYPED <addr> <integer_arg_count_0_to_16> [name]");
+        return CmdHook(ParseAddr(tokens[1]), tokens.size() > 3 ? JoinFrom(tokens, 3) : "", ParseInt(tokens[2], -1));
+    }
     if (cmd == "HOOK") {
         if (tokens.size() < 2) return ErrorResponse("usage: HOOK <addr_hex> [name]  OR  HOOK <module.dll> <FunctionName>");
         // Detect module+function form: if token[1] contains a dot and doesn't start with 0x
