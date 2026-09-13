@@ -6,6 +6,25 @@ Designed for authorized security research, reverse engineering, and CTF challeng
 
 ## Features
 
+### Scalar hook signatures
+
+`dbg_hook(address, name="", argument_count=4)` accepts the exact number of
+Windows x64 scalar integer/pointer arguments, from 0 through 16. For example,
+use `argument_count=5` for `GetDiskFreeSpaceA/W`. The pipe equivalent is
+`HOOK_TYPED <address> <argument_count> [name]`. The log captures the first four
+arguments; all declared arguments are forwarded, including stack arguments.
+Logging preserves the function's incoming and outgoing `LastError` values.
+
+The legacy `HOOK` command and scan/patch hook modes retain a four-argument
+signature. They must not be used for functions requiring stack arguments.
+Floating-point/vector arguments, aggregate returns and variadic signatures are
+not supported by scalar hooks. Use breakpoint/memory inspection for those calls.
+
+`tests/scalar_hooks.cpp` and `tests/test_scalar_hooks.py` exercise all 17 supported
+arities in an owned process, checking argument forwarding, entry/return LastError
+and unhook restoration. Compile the fixture as C++17, then run the Python test
+with `--probe`, `--dll` and a new `--output` JSON path (requires pywin32).
+
 - **Memory** — read, write, allocate, fill, pointer chain dereferencing
 - **Disassembly** — Zydis-powered instruction and function disassembly
 - **Pattern scanning** — IDA-style byte patterns with wildcards, string extraction

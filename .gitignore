@@ -9,6 +9,7 @@
 
 # Compiled binaries (users must build from source)
 dll/mcp_debugger.dll
+dll/mcp_debugger-scalar-*.dll
 injector/mcp_inject.exe
 build_total/
 x64/

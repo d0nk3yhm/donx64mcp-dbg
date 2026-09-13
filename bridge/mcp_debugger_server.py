@@ -14,7 +14,7 @@ import sys, os, json, time, re, subprocess, tempfile
 _THIS  = os.path.dirname(os.path.abspath(__file__))
 _ROOT  = os.path.dirname(_THIS)
 INJECTOR = os.path.join(_ROOT, "injector", "mcp_inject.exe")
-DBG_DLL  = os.path.join(_ROOT, "dll",      "mcp_debugger.dll")
+DBG_DLL  = os.environ.get("DONX_DEBUGGER_DLL", os.path.join(_ROOT, "dll", "mcp_debugger.dll"))
 
 try:
     import win32file, win32pipe, pywintypes
@@ -521,12 +521,16 @@ def dbg_sections(module_name: str) -> str:
 # ── API hooks ─────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def dbg_hook(address: str, name: str = "") -> str:
-    """Hook a function to log all calls to it.
-    Captures first 4 args (RCX, RDX, R8, R9) and return value each call.
-    address: hex address of function to hook
-    name: optional label for the hook"""
-    cmd = f"HOOK {address}"
+def dbg_hook(address: str, name: str = "", argument_count: int = 4) -> str:
+    """Log calls using the exact scalar integer/pointer arity (0-16).
+
+    Records the first four arguments and the return value; forwards every
+    declared argument and preserves entry/return LastError. The legacy default
+    is four. FP/vector/aggregate/variadic signatures are not supported.
+    """
+    if not 0 <= argument_count <= 16:
+        return json.dumps({"status": "error", "message": "argument_count must be 0-16"})
+    cmd = f"HOOK_TYPED {address} {argument_count}"
     if name: cmd += f" {name}"
     return send(cmd)
 

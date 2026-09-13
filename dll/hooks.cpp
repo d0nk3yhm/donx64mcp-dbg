@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <cstring>
 #include <intrin.h>
+#include <array>
+#include <utility>
 
 #pragma intrinsic(_ReturnAddress)
 
@@ -213,49 +215,57 @@ static void RunScanOutput(HookSlot& slot, uint64_t rcx, uint64_t rdx, uint64_t r
 // templated detours (16 fixed slots -- can't generate arbitrary functions at
 // runtime in C++ without JIT).
 
-#define DETOUR_FUNC(N) \
-static uint64_t __fastcall Detour_##N(uint64_t rcx, uint64_t rdx, uint64_t r8, uint64_t r9) { \
-    /* Capture the return address IMMEDIATELY on entry. Because MinHook uses \
-       a JMP (not CALL) to enter this detour, _ReturnAddress() here yields \
-       the address in the ORIGINAL caller's code (right after their CALL to \
-       the hooked function) -- exactly what MODE_SCAN_CALLER needs. Calling \
-       _ReturnAddress() inside a nested helper like RunScanCaller instead \
-       would give a debugger-DLL-internal address, which is wrong. */ \
-    uint64_t orig_caller = (uint64_t)_ReturnAddress(); \
-    HookSlot& slot = g_hook_slots[N]; \
-    EnterCriticalSection(&g_hook_cs); \
-    int idx = slot.log_index % MCP_HOOK_LOG_SIZE; \
-    slot.log[idx].rcx = rcx; \
-    slot.log[idx].rdx = rdx; \
-    slot.log[idx].r8 = r8; \
-    slot.log[idx].r9 = r9; \
-    slot.log[idx].thread_id = GetCurrentThreadId(); \
-    slot.log[idx].timestamp = GetTickCount64(); \
-    slot.log[idx].patched = false; \
-    slot.call_count++; \
-    LeaveCriticalSection(&g_hook_cs); \
-    typedef uint64_t (__fastcall *OrigFn)(uint64_t, uint64_t, uint64_t, uint64_t); \
-    uint64_t ret = ((OrigFn)slot.original)(rcx, rdx, r8, r9); \
-    if (slot.mode == MODE_SCAN_CALLER) RunScanCaller(slot, orig_caller); \
-    else if (slot.mode == MODE_SCAN_OUTPUT) RunScanOutput(slot, rcx, rdx, r8, r9); \
-    EnterCriticalSection(&g_hook_cs); \
-    slot.log[idx].ret_value = ret; \
-    slot.log_index++; \
-    LeaveCriticalSection(&g_hook_cs); \
-    return ret; \
+
+// Each declared arity has its own real C++ signature. Calling a five-or-more
+// argument function through the old four-argument pointer loses stack arguments.
+// This supports scalar integer/pointer Win64 signatures only, not FP/vector,
+// aggregate returns or variadic functions. The caller must supply the right arity.
+template<size_t> using HookWord = uint64_t;
+template<size_t Slot, size_t... Indices>
+static uint64_t __fastcall ScalarDetour(HookWord<Indices>... args) {
+    const DWORD entry_error = GetLastError();
+    const uint64_t orig_caller = (uint64_t)_ReturnAddress();
+    HookSlot& slot = g_hook_slots[Slot];
+    const uint64_t words[] = {args..., 0, 0, 0, 0};
+    EnterCriticalSection(&g_hook_cs);
+    const int idx = slot.log_index % MCP_HOOK_LOG_SIZE;
+    slot.log[idx].rcx = words[0]; slot.log[idx].rdx = words[1];
+    slot.log[idx].r8 = words[2]; slot.log[idx].r9 = words[3];
+    slot.log[idx].thread_id = GetCurrentThreadId();
+    slot.log[idx].timestamp = GetTickCount64();
+    slot.log[idx].patched = false;
+    slot.call_count++;
+    LeaveCriticalSection(&g_hook_cs);
+    using Original = uint64_t (__fastcall *)(HookWord<Indices>...);
+    SetLastError(entry_error);
+    const uint64_t result = ((Original)slot.original)(args...);
+    const DWORD return_error = GetLastError();
+    if (slot.mode == MODE_SCAN_CALLER) RunScanCaller(slot, orig_caller);
+    else if (slot.mode == MODE_SCAN_OUTPUT)
+        RunScanOutput(slot, words[0], words[1], words[2], words[3]);
+    EnterCriticalSection(&g_hook_cs);
+    slot.log[idx].ret_value = result;
+    slot.log_index++;
+    LeaveCriticalSection(&g_hook_cs);
+    SetLastError(return_error);
+    return result;
 }
-
-DETOUR_FUNC(0)  DETOUR_FUNC(1)  DETOUR_FUNC(2)  DETOUR_FUNC(3)
-DETOUR_FUNC(4)  DETOUR_FUNC(5)  DETOUR_FUNC(6)  DETOUR_FUNC(7)
-DETOUR_FUNC(8)  DETOUR_FUNC(9)  DETOUR_FUNC(10) DETOUR_FUNC(11)
-DETOUR_FUNC(12) DETOUR_FUNC(13) DETOUR_FUNC(14) DETOUR_FUNC(15)
-
-static void* g_detour_funcs[MCP_MAX_HOOK_SLOTS] = {
-    (void*)Detour_0,  (void*)Detour_1,  (void*)Detour_2,  (void*)Detour_3,
-    (void*)Detour_4,  (void*)Detour_5,  (void*)Detour_6,  (void*)Detour_7,
-    (void*)Detour_8,  (void*)Detour_9,  (void*)Detour_10, (void*)Detour_11,
-    (void*)Detour_12, (void*)Detour_13, (void*)Detour_14, (void*)Detour_15,
+template<size_t Slot, size_t... Indices>
+static void* ScalarEntry(std::index_sequence<Indices...>) {
+    return (void*)&ScalarDetour<Slot, Indices...>;
+}
+template<size_t Slot, size_t... Counts>
+static std::array<void*, sizeof...(Counts)> ScalarEntries(std::index_sequence<Counts...>) {
+    return {{ScalarEntry<Slot>(std::make_index_sequence<Counts>{})...}};
+}
+#define SLOT_ENTRIES(N) ScalarEntries<N>(std::make_index_sequence<17>{})
+static const std::array<void*,17> g_detour_funcs[MCP_MAX_HOOK_SLOTS] = {
+    SLOT_ENTRIES(0), SLOT_ENTRIES(1), SLOT_ENTRIES(2), SLOT_ENTRIES(3),
+    SLOT_ENTRIES(4), SLOT_ENTRIES(5), SLOT_ENTRIES(6), SLOT_ENTRIES(7),
+    SLOT_ENTRIES(8), SLOT_ENTRIES(9), SLOT_ENTRIES(10), SLOT_ENTRIES(11),
+    SLOT_ENTRIES(12), SLOT_ENTRIES(13), SLOT_ENTRIES(14), SLOT_ENTRIES(15)
 };
+#undef SLOT_ENTRIES
 
 // -- Init / Cleanup -----------------------------------------------------------
 
@@ -303,7 +313,8 @@ static int FindSlotByAddr(uint64_t addr) {
 // Shared: allocate a slot, create + enable the MinHook hook. Caller fills in
 // slot-specific config (mode, pattern, etc.) via the returned slot pointer.
 // Must be called with g_hook_cs held.
-static std::string InstallHook(uint64_t addr, const std::string& name, HookSlot** out_slot, int* out_idx) {
+static std::string InstallHook(uint64_t addr, const std::string& name, HookSlot** out_slot, int* out_idx, int argument_count = 4) {
+    if (argument_count < 0 || argument_count > 16) return "argument count must be 0-16";
     if (!g_minhook_ready)
         return "MinHook not initialized";
 
@@ -319,7 +330,7 @@ static std::string InstallHook(uint64_t addr, const std::string& name, HookSlot*
     hs.target = addr;
     strncpy(hs.name, name.empty() ? "unnamed" : name.c_str(), sizeof(hs.name) - 1);
 
-    MH_STATUS status = MH_CreateHook((void*)addr, g_detour_funcs[slot], &hs.original);
+    MH_STATUS status = MH_CreateHook((void*)addr, g_detour_funcs[slot][argument_count], &hs.original);
     if (status != MH_OK)
         return "MH_CreateHook failed: " + std::to_string((int)status);
 
@@ -335,10 +346,10 @@ static std::string InstallHook(uint64_t addr, const std::string& name, HookSlot*
     return "";
 }
 
-std::string CmdHook(uint64_t addr, const std::string& name) {
+std::string CmdHook(uint64_t addr, const std::string& name, int argument_count) {
     EnterCriticalSection(&g_hook_cs);
     HookSlot* hs = nullptr; int slot = -1;
-    std::string err = InstallHook(addr, name, &hs, &slot);
+    std::string err = InstallHook(addr, name, &hs, &slot, argument_count);
     if (!err.empty()) { LeaveCriticalSection(&g_hook_cs); return ErrorResponse(err); }
     hs->mode = MODE_LOG;
     std::string hookName = hs->name;
